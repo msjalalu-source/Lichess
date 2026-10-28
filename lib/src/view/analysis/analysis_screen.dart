@@ -14,6 +14,7 @@ import 'package:lichess_mobile/src/utils/immersive_mode.dart';
 import 'package:lichess_mobile/src/utils/l10n_context.dart';
 import 'package:lichess_mobile/src/utils/navigation.dart';
 import 'package:lichess_mobile/src/utils/share.dart';
+import 'package:lichess_mobile/src/view/analysis/ai_coach_screen.dart';
 import 'package:lichess_mobile/src/view/analysis/analysis_actions.dart';
 import 'package:lichess_mobile/src/view/analysis/analysis_layout.dart';
 import 'package:lichess_mobile/src/view/analysis/analysis_player_widget.dart';
@@ -140,6 +141,12 @@ class _AnalysisScreenState() extends ConsumerState<_AnalysisScreen> {
                 icon: const Icon(Icons.more_horiz),
                 semanticsLabel: context.l10n.menu,
                 actions: [
+                  if (value.isComputerAnalysisAllowed)
+                    ContextMenuAction(
+                      icon: Icons.psychology_outlined,
+                      label: 'AI Chess Coach',
+                      onPressed: () => Navigator.of(context).push(AiCoachScreen.buildRoute(widget.options)),
+                    ),
                   if (value.archivedGame case final archivedGame?)
                     ContextMenuAction(
                       icon: archivedGame.data.bookmarked == true
