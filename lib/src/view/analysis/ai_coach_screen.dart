@@ -10,6 +10,8 @@ import 'package:lichess_mobile/src/model/common/eval.dart';
 import 'package:lichess_mobile/src/model/common/node.dart';
 import 'package:lichess_mobile/src/model/engine/engine_utils.dart';
 import 'package:lichess_mobile/src/model/engine/position_evaluator.dart';
+import 'package:lichess_mobile/src/model/game/game_history.dart';
+import 'package:lichess_mobile/src/view/analysis/retro_screen.dart';
 import 'package:lichess_mobile/src/model/puzzle/puzzle_angle.dart';
 import 'package:lichess_mobile/src/model/puzzle/puzzle_theme.dart';
 import 'package:lichess_mobile/src/view/puzzle/puzzle_screen.dart';
@@ -443,4 +445,306 @@ Future<String> _askGemini({
   } catch (_) {
     throw const _AiCoachException('AI-র উত্তর বোঝা যায়নি। আবার চেষ্টা করুন।');
   }
+}
+
+// ---------------------------------------------------------------------------
+// Everywhere access: a small round button on every screen that opens a general AI chat.
+// ---------------------------------------------------------------------------
+
+bool _aiChatOpen = false;
+
+const _kChatSystemPrompt =
+    'তুমি একজন ধৈর্যশীল দাবা কোচ। সহজ, সাধারণ বাংলায় উত্তর দাও। দাবার নোটেশন ইংরেজিতে রাখতে পারো। '
+    'সাধারণ দাবার প্রশ্ন (নিয়ম, ওপেনিং, কৌশল, অনুশীলনের পরামর্শ) বুঝিয়ে বলো। '
+    'তোমার কাছে কোনো ইঞ্জিনের তথ্য নেই, তাই কোনো নির্দিষ্ট পজিশনের সেরা চাল বা স্কোর বানিয়ে বলবে না। '
+    'সেক্ষেত্রে বলবে Analysis স্ক্রিনে AI Coach ব্যবহার করতে। '
+    'চলমান বা র‍্যাঙ্কড খেলায় চাল বলে দেবে না, কারণ এটা Lichess-এর ন্যায্য খেলার নিয়মের বিরুদ্ধে। '
+    'উত্তর ছোট ও ফোনে পড়ার মতো রাখো।';
+
+/// Wraps the whole app and floats a small button above every screen.
+class AiCoachOverlay extends StatelessWidget {
+  const AiCoachOverlay({required this.navigatorKey, required this.child, super.key});
+
+  final GlobalKey<NavigatorState> navigatorKey;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        child,
+        Positioned(
+          right: 8,
+          bottom: 100,
+          child: FloatingActionButton.small(
+            heroTag: null,
+            onPressed: () {
+              if (_aiChatOpen) return;
+              _aiChatOpen = true;
+              navigatorKey.currentState
+                  ?.push(AiChatScreen.buildRoute())
+                  .whenComplete(() => _aiChatOpen = false);
+            },
+            child: const Icon(Icons.psychology_outlined),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class AiChatScreen extends StatefulWidget {
+  const AiChatScreen({super.key});
+
+  static Route<dynamic> buildRoute() => buildScreenRoute(screen: const AiChatScreen());
+
+  @override
+  State<AiChatScreen> createState() => _AiChatScreenState();
+}
+
+class _AiChatScreenState extends State<AiChatScreen> {
+  final _controller = TextEditingController();
+  final _messages = <({String q, String a})>[];
+  int _requestId = 0;
+  bool _loading = false;
+  String? _error;
+  String? _lastQuestion;
+
+  @override
+  void dispose() {
+    _requestId++;
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _send(String question) async {
+    final id = ++_requestId;
+    _lastQuestion = question;
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final key = await SecureStorage.instance.read(key: _kKeyStorage);
+      if (key == null || key.trim().isEmpty) {
+        throw const _AiCoachException('Gemini API Key দেওয়া নেই। উপরের সেটিংস (গিয়ার) আইকনে চেপে Key দিন।');
+      }
+      final model = (await SecureStorage.instance.read(key: _kModelStorage))?.trim();
+      final recent = _messages.reversed.take(3).toList().reversed;
+      final history = recent.map((m) => 'আগের প্রশ্ন: ${m.q}\nআগের উত্তর: ${m.a}').join('\n\n');
+      final text = await _askGemini(
+        apiKey: key.trim(),
+        model: (model == null || model.isEmpty) ? _kDefaultModel : model,
+        system: _kChatSystemPrompt,
+        prompt: history.isEmpty ? question : '$history\n\nনতুন প্রশ্ন: $question',
+      );
+      if (!mounted || id != _requestId) return;
+      setState(() {
+        _messages.add((q: question, a: text));
+        _loading = false;
+        _controller.clear();
+      });
+    } on _AiCoachException catch (e) {
+      if (!mounted || id != _requestId) return;
+      setState(() {
+        _error = e.message;
+        _loading = false;
+      });
+    } catch (_) {
+      if (!mounted || id != _requestId) return;
+      setState(() {
+        _error = 'কিছু একটা সমস্যা হয়েছে। ইন্টারনেট দেখে আবার চেষ্টা করুন।';
+        _loading = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('AI Chess Coach'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.settings),
+            onPressed: () => showAiSettingsDialog(context),
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+            child: OutlinedButton(
+              onPressed: () => Navigator.of(context).push(buildScreenRoute(screen: const MyMistakesScreen())),
+              child: const Text('আমার ভুল থেকে শেখো (নিজের গেম থেকে পাজল)'),
+            ),
+          ),
+          Expanded(
+            child: ListView(
+              padding: const EdgeInsets.all(16),
+              children: [
+                if (_messages.isEmpty && !_loading)
+                  const Text(
+                    'দাবা নিয়ে যেকোনো প্রশ্ন করুন। কোনো পজিশনের সেরা চাল জানতে Analysis স্ক্রিনের AI Coach ব্যবহার করুন। '
+                    'চলমান খেলায় এটা ব্যবহার করবেন না।',
+                  ),
+                for (final m in _messages) ...[
+                  Text(m.q, style: const TextStyle(fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 4),
+                  SelectableText(m.a),
+                  const SizedBox(height: 16),
+                ],
+                if (_loading) const Center(child: CircularProgressIndicator()),
+                if (_error != null) ...[
+                  Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+                  if (_lastQuestion != null)
+                    TextButton(
+                      onPressed: () => _send(_lastQuestion!),
+                      child: const Text('আবার চেষ্টা করুন'),
+                    ),
+                ],
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 8, 8),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _controller,
+                    minLines: 1,
+                    maxLines: 4,
+                    decoration: const InputDecoration(
+                      hintText: 'আপনার প্রশ্ন লিখুন',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.send),
+                  onPressed: _loading
+                      ? null
+                      : () {
+                          final q = _controller.text.trim();
+                          if (q.isNotEmpty) _send(q);
+                        },
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+String _dateText(DateTime d) => '${d.day}/${d.month}/${d.year}';
+
+/// Lists the user's recent games. Tapping one opens Lichess' own "Learn from your mistakes"
+/// screen, which turns the mistakes found by the server analysis into puzzles.
+class MyMistakesScreen extends ConsumerWidget {
+  const MyMistakesScreen({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final games = ref.watch(myRecentGamesProvider);
+    return Scaffold(
+      appBar: AppBar(title: const Text('আমার ভুল থেকে শেখো')),
+      body: games.when(
+        data: (list) => list.isEmpty
+            ? const Center(child: Text('কোনো গেম পাওয়া যায়নি।'))
+            : ListView(
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.all(16),
+                    child: Text(
+                      'একটা গেম বেছে নিন। আপনার ভুলগুলো পাজল হয়ে আসবে, আপনি বোর্ডে খেলবেন। '
+                      '(Lichess সার্ভারের বিশ্লেষণ লাগে)',
+                    ),
+                  ),
+                  for (final g in list)
+                    ListTile(
+                      title: Text(
+                        '${g.game.speed.name} · ${_dateText(g.game.createdAt)} · ${g.pov == Side.white ? 'সাদা' : 'কালো'}',
+                      ),
+                      subtitle: Text(
+                        g.game.winner == null
+                            ? 'ড্র বা অন্য ফলাফল'
+                            : (g.game.winner == g.pov ? 'জিতেছেন' : 'হেরেছেন'),
+                      ),
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: () => Navigator.of(
+                        context,
+                      ).push(RetroScreen.buildRoute((id: g.game.id, initialSide: g.pov))),
+                    ),
+                ],
+              ),
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (e, s) => const Center(
+          child: Text('গেমের তালিকা আনা যায়নি। ইন্টারনেট দেখে আবার চেষ্টা করুন।'),
+        ),
+      ),
+    );
+  }
+}
+
+Future<void> showAiSettingsDialog(BuildContext context) async {
+  final keyController = TextEditingController();
+  final modelController = TextEditingController(
+    text: (await SecureStorage.instance.read(key: _kModelStorage)) ?? _kDefaultModel,
+  );
+  final hasKey = (await SecureStorage.instance.read(key: _kKeyStorage))?.isNotEmpty ?? false;
+  if (!context.mounted) return;
+  await showDialog<void>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('Gemini সেটিংস'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(hasKey ? 'Key সেভ করা আছে। নতুন Key দিলে বদলে যাবে।' : 'এখনো কোনো Key সেভ করা নেই।'),
+          const SizedBox(height: 12),
+          TextField(
+            controller: keyController,
+            obscureText: true,
+            autocorrect: false,
+            enableSuggestions: false,
+            decoration: const InputDecoration(labelText: 'Gemini API Key'),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: modelController,
+            autocorrect: false,
+            decoration: const InputDecoration(labelText: 'Model'),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () async {
+            await SecureStorage.instance.delete(key: _kKeyStorage);
+            if (ctx.mounted) Navigator.of(ctx).pop();
+          },
+          child: const Text('Key মুছুন'),
+        ),
+        TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('বাতিল')),
+        FilledButton(
+          onPressed: () async {
+            final k = keyController.text.trim();
+            final m = modelController.text.trim();
+            if (k.isNotEmpty) await SecureStorage.instance.write(key: _kKeyStorage, value: k);
+            await SecureStorage.instance.write(key: _kModelStorage, value: m.isEmpty ? _kDefaultModel : m);
+            if (ctx.mounted) Navigator.of(ctx).pop();
+          },
+          child: const Text('সেভ'),
+        ),
+      ],
+    ),
+  );
+  keyController.dispose();
+  modelController.dispose();
 }
