@@ -281,13 +281,14 @@ class _AppState() extends ConsumerState<Application> {
             // routes on iOS 26.
             child: GlassNavigationShell(
               enabled: usePinnedNavBar(context),
-              child: IconTheme(data: iconTheme, child: child!),
+              child: IconTheme(
+                  data: iconTheme,
+                  child: AiCoachOverlay(navigatorKey: _navigatorKey, child: child!),
+                ),
             ),
           ),
         );
       },
-      builder: (context, child) =>
-          AiCoachOverlay(navigatorKey: _navigatorKey, child: child ?? const SizedBox.shrink()),
       home: const MainTabScaffold(),
       navigatorObservers: [rootNavPageRouteObserver, rootNavRouteStackObserver],
     );
