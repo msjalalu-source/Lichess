@@ -10,6 +10,9 @@ import 'package:lichess_mobile/src/model/common/eval.dart';
 import 'package:lichess_mobile/src/model/common/node.dart';
 import 'package:lichess_mobile/src/model/engine/engine_utils.dart';
 import 'package:lichess_mobile/src/model/engine/position_evaluator.dart';
+import 'package:lichess_mobile/src/model/puzzle/puzzle_angle.dart';
+import 'package:lichess_mobile/src/model/puzzle/puzzle_theme.dart';
+import 'package:lichess_mobile/src/view/puzzle/puzzle_screen.dart';
 import 'package:lichess_mobile/src/utils/navigation.dart';
 import 'package:material_ui/material_ui.dart';
 
@@ -43,6 +46,7 @@ class AiCoachScreen extends ConsumerStatefulWidget {
 
 class _AiCoachScreenState extends ConsumerState<AiCoachScreen> {
   final _questionController = TextEditingController();
+  final _puzzleController = TextEditingController();
   int _requestId = 0;
   bool _loading = false;
   String? _answer;
@@ -53,6 +57,7 @@ class _AiCoachScreenState extends ConsumerState<AiCoachScreen> {
   void dispose() {
     _requestId++;
     _questionController.dispose();
+    _puzzleController.dispose();
     super.dispose();
   }
 
@@ -87,6 +92,54 @@ class _AiCoachScreenState extends ConsumerState<AiCoachScreen> {
         _answer = text;
         _loading = false;
       });
+    } on _AiCoachException catch (e) {
+      if (!mounted || id != _requestId) return;
+      setState(() {
+        _error = e.message;
+        _loading = false;
+      });
+    } catch (_) {
+      if (!mounted || id != _requestId) return;
+      setState(() {
+        _error = 'কিছু একটা সমস্যা হয়েছে। ইন্টারনেট দেখে আবার চেষ্টা করুন।';
+        _loading = false;
+      });
+    }
+  }
+
+  /// Gemini only picks the closest Lichess puzzle theme name from the app's own list.
+  /// The puzzles themselves come from Lichess and are played on the app's normal puzzle board.
+  Future<void> _openPuzzle() async {
+    final wish = _puzzleController.text.trim();
+    if (wish.isEmpty) return;
+    final id = ++_requestId;
+    setState(() {
+      _loading = true;
+      _error = null;
+      _answer = null;
+    });
+    try {
+      final key = await SecureStorage.instance.read(key: _kKeyStorage);
+      if (key == null || key.trim().isEmpty) {
+        throw const _AiCoachException('Gemini API Key দেওয়া নেই। উপরের সেটিংস (গিয়ার) আইকনে চেপে Key দিন।');
+      }
+      final model = (await SecureStorage.instance.read(key: _kModelStorage))?.trim();
+      final names = PuzzleThemeKey.values.map((k) => k.name).join(', ');
+      final reply = await _askGemini(
+        apiKey: key.trim(),
+        model: (model == null || model.isEmpty) ? _kDefaultModel : model,
+        system:
+            'তুমি একজন বাছাইকারী। তালিকা থেকে ব্যবহারকারীর চাওয়ার সবচেয়ে কাছের একটি থিমের নাম বেছে নাও। '
+            'শুধু সেই নামটি ইংরেজিতে, তালিকার হুবহু বানানে লেখো। আর কিছু লিখবে না।',
+        prompt: 'থিমের তালিকা: $names\nব্যবহারকারীর চাওয়া: $wish',
+      );
+      final themeKey = puzzleThemeNameMap.get(reply.trim().replaceAll(RegExp(r'[^A-Za-z0-9]'), ''));
+      if (!mounted || id != _requestId) return;
+      if (themeKey == null) {
+        throw const _AiCoachException('এই ধরনের পাজল খুঁজে পাওয়া যায়নি। অন্যভাবে বলে দেখুন।');
+      }
+      setState(() => _loading = false);
+      Navigator.of(context).push(PuzzleScreen.buildRoute(angle: PuzzleTheme(themeKey)));
     } on _AiCoachException catch (e) {
       if (!mounted || id != _requestId) return;
       setState(() {
@@ -247,6 +300,19 @@ class _AiCoachScreenState extends ConsumerState<AiCoachScreen> {
             child: const Text('জিজ্ঞাসা করো'),
           ),
           const SizedBox(height: 16),
+          TextField(
+            controller: _puzzleController,
+            decoration: const InputDecoration(
+              labelText: 'কোন ধরনের পাজল খেলতে চান? (যেমন: ফর্ক, পিন, মিডলগেম)',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 8),
+          OutlinedButton(
+            onPressed: _loading ? null : _openPuzzle,
+            child: const Text('এই ধরনের পাজল খেলো'),
+          ),
+          const SizedBox(height: 16),
           if (_loading) ...[
             const Center(child: CircularProgressIndicator()),
             const SizedBox(height: 8),
@@ -324,6 +390,7 @@ Future<String> _askGemini({
   required String apiKey,
   required String model,
   required String prompt,
+  String system = _kSystemPrompt,
 }) async {
   final uri = Uri.https(
     'generativelanguage.googleapis.com',
@@ -338,7 +405,7 @@ Future<String> _askGemini({
           body: jsonEncode({
             'systemInstruction': {
               'parts': [
-                {'text': _kSystemPrompt},
+                {'text': system},
               ],
             },
             'contents': [
